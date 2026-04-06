@@ -1,5 +1,6 @@
 local approvals = require("codecompanion.interactions.chat.tools.approvals")
 local config = require("codecompanion.config")
+local patch_review = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.patch_review")
 local ui_utils = require("codecompanion.utils.ui")
 
 local fmt = string.format
@@ -41,13 +42,77 @@ local function open_patch_editor(opts)
   })
 end
 
+---Open an editable diff view that applies changes from the edited buffer
+---@param opts table
+local function open_editable_diff_view(opts)
+  local diff_helpers = require("codecompanion.helpers")
+  local labels = require("codecompanion.interactions.chat.tools.labels")
+
+  local bufnr, _ = ui_utils.create_float(opts.from_lines, {
+    width = 0.9,
+    height = 0.8,
+    ft = opts.ft,
+    ignore_keymaps = true,
+    title = opts.title,
+  })
+
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].swapfile = false
+  vim.bo[bufnr].modifiable = true
+  vim.bo[bufnr].readonly = false
+
+  local diff_ui = diff_helpers.show_diff({
+    bufnr = bufnr,
+    chat_bufnr = opts.chat_bufnr,
+    diff_id = math.random(10000000),
+    ft = opts.ft,
+    from_lines = opts.from_lines,
+    inline = true,
+    to_lines = opts.to_lines,
+    title = opts.title,
+    tool_name = "insert_edit_into_file",
+    keymaps = {
+      on_always_accept = function()
+        if opts.on_done then
+          opts.on_done(labels.always_accept)
+        end
+        approvals:always(opts.chat_bufnr, { tool_name = "insert_edit_into_file" })
+      end,
+      on_accept = function(ui)
+        local edited_lines = vim.api.nvim_buf_get_lines(ui.bufnr, 0, -1, false)
+        local edited_patch_text = patch_review.build_unified_patch({
+          filepath = opts.filepath or opts.title,
+          from_lines = opts.from_lines,
+          to_lines = edited_lines,
+        })
+        if opts.on_done then
+          opts.on_done(labels.accept)
+        end
+        opts.apply(edited_patch_text)
+      end,
+      on_reject = function()
+        if opts.on_done then
+          opts.on_done(labels.reject)
+        end
+        get_rejection_reason(function(reason)
+          local msg = fmt('User rejected the edits for `%s`, with the reason "%s"', opts.title, reason)
+          opts.output_cb(make_response("error", msg))
+        end)
+      end,
+    },
+  })
+
+  return diff_ui
+end
+
 ---Open the floating diff view with associated keymaps
 ---@param opts table
 local function open_diff_view(opts)
   local diff_helpers = require("codecompanion.helpers")
   local labels = require("codecompanion.interactions.chat.tools.labels")
 
-  diff_helpers.show_diff({
+  local diff_ui = diff_helpers.show_diff({
     chat_bufnr = opts.chat_bufnr,
     diff_id = math.random(10000000),
     ft = opts.ft,
@@ -79,6 +144,15 @@ local function open_diff_view(opts)
       end,
     },
   })
+
+  vim.keymap.set("n", "ge", function()
+    open_editable_diff_view(opts)
+  end, {
+    buffer = diff_ui.bufnr,
+    desc = "Edit proposed changes in an editable diff buffer",
+    silent = true,
+    nowait = true,
+  })
 end
 
 ---Build out the choices that users have with respect to the diff and approval flow
@@ -106,6 +180,14 @@ local function build_approval_choices(opts)
       end,
     },
     {
+      keymap = keys.reject,
+      label = "Edit and apply",
+      preview = true,
+      callback = function()
+        open_editable_diff_view(opts)
+      end,
+    },
+    {
       keymap = keys.always_accept,
       label = labels.always_accept,
       callback = function()
@@ -121,7 +203,7 @@ local function build_approval_choices(opts)
       end,
     },
     {
-      keymap = keys.reject,
+      keymap = "gr",
       label = labels.reject,
       callback = function()
         get_rejection_reason(function(reason)
