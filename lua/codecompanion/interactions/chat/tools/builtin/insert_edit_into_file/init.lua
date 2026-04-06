@@ -266,6 +266,7 @@ local function execute_edit(source, action, opts)
     approved = approvals:is_approved(opts.chat_bufnr, { tool_name = "insert_edit_into_file" }),
     chat = opts.chat,
     chat_bufnr = opts.chat_bufnr,
+    filepath = source_path,
     ft = source.ft,
     output_cb = opts.output_cb,
     require_confirmation_after = opts.tool_opts.require_confirmation_after,
