@@ -6,13 +6,27 @@ local fmt = string.format
 
 local M = {}
 
+---@return string
+local function cwd_root()
+  return vim.fs.normalize(vim.fn.getcwd())
+end
+
 ---@param path string
 ---@return string
 local function to_relpath(path)
   if type(path) ~= "string" or path == "" then
     return "buffer"
   end
-  return vim.fn.fnamemodify(path, ":.")
+  local absolute = vim.fs.normalize(path)
+  local root = cwd_root()
+  if absolute:sub(1, #root) == root then
+    local stripped = absolute:sub(#root + 1)
+    stripped = stripped:gsub("^[/\\]", "")
+    if stripped ~= "" then
+      return stripped
+    end
+  end
+  return vim.fn.fnamemodify(absolute, ":t")
 end
 
 ---@param left string
@@ -55,6 +69,7 @@ end
 ---@param opts { filepath: string, from_lines: string[], to_lines: string[] }
 ---@return string
 function M.build_unified_patch(opts)
+  -- Use vim.text.diff when available, with fallback to vim.diff for compatibility.
   ---@diagnostic disable-next-line: deprecated
   local diff_fn = vim.text.diff or vim.diff
   local relative_path = to_relpath(opts.filepath)
