@@ -431,6 +431,68 @@ end
 
 T["Integration"] = new_set()
 
+T["Integration"]["applies edited patch text instead of original diff output"] = function()
+  child.lua([[
+    local initial = "local x = 1"
+    vim.fn.writefile(vim.split(initial, "\n"), _G.TEST_TMPFILE)
+
+    local edit_diff = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.diff")
+    local original_review = edit_diff.review
+    edit_diff.review = function(opts)
+      local patch_review = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.patch_review")
+      local patch_text = patch_review.build_unified_patch({
+        filepath = _G.TEST_TMPFILE,
+        from_lines = opts.from_lines,
+        to_lines = opts.to_lines,
+      })
+      local edited_patch = patch_text:gsub("local x = 10", "local x = 42")
+      opts.apply(edited_patch)
+    end
+
+    local tool = {{
+      ["function"] = {
+        name = "insert_edit_into_file",
+        arguments = string.format('{"filepath": "%s", "edits": [{"oldText": "local x = 1", "newText": "local x = 10"}]}', _G.TEST_TMPFILE)
+      },
+    }}
+
+    tools:execute(chat, tool)
+    vim.wait(20)
+    edit_diff.review = original_review
+  ]])
+
+  local output = child.lua_get("vim.fn.readfile(_G.TEST_TMPFILE)")
+  h.eq(output, { "local x = 42" })
+end
+
+T["Integration"]["returns error when edited patch is malformed"] = function()
+  child.lua([[
+    local initial = "local x = 1"
+    vim.fn.writefile(vim.split(initial, "\n"), _G.TEST_TMPFILE)
+
+    local edit_diff = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.diff")
+    local original_review = edit_diff.review
+    edit_diff.review = function(opts)
+      opts.apply("not a valid unified patch")
+    end
+
+    local tool = {{
+      ["function"] = {
+        name = "insert_edit_into_file",
+        arguments = string.format('{"filepath": "%s", "edits": [{"oldText": "local x = 1", "newText": "local x = 10"}]}', _G.TEST_TMPFILE)
+      },
+    }}
+
+    tools:execute(chat, tool)
+    vim.wait(20)
+    _G.last_message = chat.messages[#chat.messages].content
+    edit_diff.review = original_review
+  ]])
+
+  local output = child.lua_get("_G.last_message")
+  h.expect_contains("Edited patch is invalid", output)
+end
+
 T["Integration"]["handles complex multi-edit transformation"] = function()
   child.lua([[
     -- Real-world scenario: refactoring a function with error handling

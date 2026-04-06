@@ -1843,14 +1843,6 @@ function Chat:record_applied_patch(metadata)
   self.last_applied_patch = metadata
   self:update_metadata()
 
-  if metadata.applied_patch_hash then
-    local patch_id = string.format("<patch>%s</patch>", metadata.applied_patch_hash)
-    self:add_message({
-      role = config.constants.USER_ROLE,
-      content = "Applied patch metadata recorded",
-    }, { visible = false, context = { id = patch_id }, _meta = { tag = "applied_patch" } })
-  end
-
   return self
 end
 

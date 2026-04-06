@@ -324,6 +324,28 @@ T["Chat"]["can load default tools"] = function()
   )
 end
 
+T["Chat"]["records patch metadata and builds recent patch priority map"] = function()
+  local result = child.lua([[
+    _G.chat:record_applied_patch({
+      tool = "insert_edit_into_file",
+      filepath = "/tmp/main.lua",
+      files_touched = { "/tmp/secondary.lua", "/tmp/main.lua" },
+      applied_patch_hash = 123,
+      used_edited_patch = true,
+    })
+    return {
+      has_last = _G.chat.last_applied_patch ~= nil,
+      applied_count = #_G.chat.applied_patches,
+      priority = _G.chat:get_recent_patch_priority(),
+    }
+  ]])
+
+  h.eq(true, result.has_last)
+  h.eq(1, result.applied_count)
+  h.expect_truthy(result.priority[vim.fs.normalize("/tmp/main.lua")])
+  h.expect_truthy(result.priority[vim.fs.normalize("/tmp/secondary.lua")])
+end
+
 T["Chat"]["ftplugin window options override plugin defaults"] = function()
   -- This test verifies that user's after/ftplugin/codecompanion.lua can override
   -- the plugin's default window options. This ensures setting filetype
