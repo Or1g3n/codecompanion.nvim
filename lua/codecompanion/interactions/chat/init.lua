@@ -135,6 +135,18 @@ local function sync_all_buffer_content(chat)
     return
   end
 
+  local priority = chat:get_recent_patch_priority()
+  table.sort(synced, function(left, right)
+    local left_path = left.path and vim.fs.normalize(left.path) or ""
+    local right_path = right.path and vim.fs.normalize(right.path) or ""
+    local left_weight = priority[left_path] or 0
+    local right_weight = priority[right_path] or 0
+    if left_weight == right_weight then
+      return tostring(left.id) < tostring(right.id)
+    end
+    return left_weight > right_weight
+  end)
+
   -- Build a set of context IDs already present in this cycle for O(1) duplicate checks
   local seen = {}
   for _, msg in ipairs(chat.messages) do
@@ -361,6 +373,8 @@ function Chat.new(args)
     buffer_context = args.buffer_context,
     callbacks = {},
     context_items = {},
+    applied_patches = {},
+    last_applied_patch = nil,
     cycle = 1,
     header_line = 1,
     from_prompt_library = args.from_prompt_library or false,
@@ -1732,6 +1746,8 @@ function Chat:clear()
   self.header_line = 1
   self.messages = {}
   self.context_items = {}
+  self.applied_patches = {}
+  self.last_applied_patch = nil
 
   self.tool_registry:clear()
 
@@ -1790,6 +1806,11 @@ function Chat:update_metadata()
     mode = mode_info,
     tokens = self.ui.tokens or 0,
     tools = vim.tbl_count(self.tool_registry.in_use) or 0,
+    last_patch = self.last_applied_patch and {
+      filepath = self.last_applied_patch.filepath,
+      tool = self.last_applied_patch.tool,
+      used_edited_patch = self.last_applied_patch.used_edited_patch,
+    } or nil,
   }
 
   if self.adapter.type == "acp" then
@@ -1800,6 +1821,62 @@ function Chat:update_metadata()
       utils.fire("ChatACPModeChanged", { bufnr = self.bufnr, id = self.id, mode = mode_info })
     end
   end
+end
+
+---Record metadata for a successfully applied patch
+---@param metadata table
+---@return CodeCompanion.Chat
+function Chat:record_applied_patch(metadata)
+  if type(metadata) ~= "table" then
+    return self
+  end
+
+  local list = self.applied_patches or {}
+  local max_items = 20
+
+  table.insert(list, metadata)
+  if #list > max_items then
+    table.remove(list, 1)
+  end
+
+  self.applied_patches = list
+  self.last_applied_patch = metadata
+  self:update_metadata()
+
+  if metadata.applied_patch_hash then
+    local patch_id = string.format("<patch>%s</patch>", metadata.applied_patch_hash)
+    self:add_message({
+      role = config.constants.USER_ROLE,
+      content = "Applied patch metadata recorded",
+    }, { visible = false, context = { id = patch_id }, _meta = { tag = "applied_patch" } })
+  end
+
+  return self
+end
+
+---Get a map of prioritized file paths from recent patch metadata
+---@return table<string, number>
+function Chat:get_recent_patch_priority()
+  local priority = {}
+  local last_patch = self.last_applied_patch
+
+  if not last_patch then
+    return priority
+  end
+
+  for index, path in ipairs(last_patch.files_touched or {}) do
+    if type(path) == "string" and path ~= "" then
+      local normalized = vim.fs.normalize(path)
+      priority[normalized] = math.max(priority[normalized] or 0, 100 - index)
+    end
+  end
+
+  if type(last_patch.filepath) == "string" and last_patch.filepath ~= "" then
+    local normalized = vim.fs.normalize(last_patch.filepath)
+    priority[normalized] = math.max(priority[normalized] or 0, 100)
+  end
+
+  return priority
 end
 
 ---Set the title of the chat buffer

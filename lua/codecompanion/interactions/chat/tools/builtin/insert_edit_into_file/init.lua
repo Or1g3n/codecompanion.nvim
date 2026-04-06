@@ -32,6 +32,7 @@ local diff = require("codecompanion.interactions.chat.tools.builtin.insert_edit_
 local io_mod = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.io")
 local json_repair = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.json_repair")
 local match_selector = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.match_selector")
+local patch_review = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.patch_review")
 local process_mod = require("codecompanion.interactions.chat.tools.builtin.insert_edit_into_file.process")
 
 local buf_utils = require("codecompanion.utils.buffers")
@@ -95,9 +96,13 @@ local function make_file_source(action)
   return {
     content = content,
     file_info = file_info,
+    path = path,
     display_name = display_name,
     ft = vim.filetype.match({ filename = path }) or "text",
     process_opts = { path = path, file_info = file_info, mode = action.mode },
+    read = function()
+      return io_mod.read_file(path)
+    end,
     write = function(new_content)
       return io_mod.write_file(path, new_content, file_info)
     end,
@@ -116,6 +121,7 @@ local function make_buffer_source(bufnr, action)
   local lines = api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local content = table.concat(lines, "\n")
   local buffer_name = api.nvim_buf_get_name(bufnr)
+  local path = buffer_name ~= "" and buffer_name or nil
   local display_name = buffer_name ~= "" and vim.fn.fnamemodify(buffer_name, ":.") or fmt("buffer %d", bufnr)
 
   local file_info = {
@@ -126,9 +132,18 @@ local function make_buffer_source(bufnr, action)
   return {
     content = content,
     file_info = file_info,
+    path = path,
     display_name = display_name,
     ft = vim.bo[bufnr].filetype or "text",
     process_opts = { buffer = bufnr, file_info = file_info, mode = action.mode },
+    read = function()
+      local latest_lines = api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      local latest_content = table.concat(latest_lines, "\n")
+      return latest_content, nil, {
+        has_trailing_newline = latest_content:match("\n$") ~= nil,
+        is_empty = latest_content == "",
+      }
+    end,
     write = function(new_content)
       local new_lines = vim.split(new_content, "\n", { plain = true })
       api.nvim_buf_set_lines(bufnr, 0, -1, false, new_lines)
@@ -160,15 +175,92 @@ local function execute_edit(source, action, opts)
   end
 
   local success_msg = fmt("Edited `%s`%s", source.display_name, extract_explanation(action))
+  local source_path = source.path or source.display_name
+  local original_from_lines = vim.split(source.content, "\n", { plain = true })
+  local original_to_lines = vim.split(edit.content, "\n", { plain = true })
+  local original_patch_text = patch_review.build_unified_patch({
+    filepath = source_path,
+    from_lines = original_from_lines,
+    to_lines = original_to_lines,
+  })
+  local original_patch_hash = patch_review.compute_patch_hash({ patch_text = original_patch_text })
 
   return diff.review({
-    from_lines = vim.split(source.content, "\n", { plain = true }),
-    to_lines = vim.split(edit.content, "\n", { plain = true }),
-    apply = function()
-      local write_ok, write_err = source.write(edit.content)
+    from_lines = original_from_lines,
+    to_lines = original_to_lines,
+    open_patch_editor = function(args)
+      patch_review.open_editable_patch_buffer({
+        patch_text = original_patch_text,
+        title = fmt("Edit patch for `%s`", source.display_name),
+        on_accept = args.on_accept,
+        on_cancel = args.on_cancel,
+      })
+    end,
+    apply = function(edited_patch_text)
+      local content_to_write = edit.content
+      local applied_patch_hash = original_patch_hash
+      local files_touched = { source.display_name }
+      local hunk_ranges = {}
+      local used_edited_patch = false
+
+      if type(edited_patch_text) == "string" and vim.trim(edited_patch_text) ~= "" then
+        local is_custom_patch = edited_patch_text ~= original_patch_text
+        if is_custom_patch then
+          local latest_content, read_err = source.read()
+          if not latest_content then
+            return opts.output_cb(make_response("error", fmt("Error reading `%s`: %s", source.display_name, read_err)))
+          end
+
+          local parsed = patch_review.parse_unified_patch({ patch_text = edited_patch_text })
+          if not parsed.ok then
+            return opts.output_cb(make_response("error", "Edited patch is invalid: " .. parsed.error))
+          end
+
+          local latest_lines = vim.split(latest_content, "\n", { plain = true })
+          local valid = patch_review.validate_patch({
+            patch = parsed.patch,
+            expected_path = source_path,
+            source_lines = latest_lines,
+          })
+          if not valid.ok then
+            return opts.output_cb(make_response("error", "Edited patch validation failed: " .. valid.error))
+          end
+
+          local applied = patch_review.apply_patch({
+            patch = parsed.patch,
+            source_lines = latest_lines,
+            expected_path = source_path,
+          })
+          if not applied.ok then
+            return opts.output_cb(make_response("error", "Edited patch could not be applied: " .. applied.error))
+          end
+
+          content_to_write = table.concat(applied.new_lines or {}, "\n")
+          used_edited_patch = true
+          applied_patch_hash = patch_review.compute_patch_hash({ patch_text = edited_patch_text })
+          files_touched = applied.files_touched or files_touched
+          hunk_ranges = applied.hunk_ranges or {}
+        end
+      end
+
+      local write_ok, write_err = source.write(content_to_write)
       if not write_ok then
         return opts.output_cb(make_response("error", fmt("Error writing to `%s`: %s", source.display_name, write_err)))
       end
+
+      if opts.chat and opts.chat.record_applied_patch then
+        opts.chat:record_applied_patch({
+          timestamp = os.time(),
+          tool = "insert_edit_into_file",
+          filepath = source.display_name,
+          files_touched = files_touched,
+          hunk_ranges = hunk_ranges,
+          original_patch_hash = original_patch_hash,
+          applied_patch_hash = applied_patch_hash,
+          used_edited_patch = used_edited_patch,
+        })
+      end
+
       opts.output_cb(make_response("success", success_msg))
     end,
     approved = approvals:is_approved(opts.chat_bufnr, { tool_name = "insert_edit_into_file" }),

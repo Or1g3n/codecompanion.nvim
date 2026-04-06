@@ -22,6 +22,25 @@ local function get_rejection_reason(callback)
   end)
 end
 
+---Open an editable patch review buffer
+---@param opts table
+local function open_patch_editor(opts)
+  if not opts.open_patch_editor then
+    return
+  end
+
+  opts.open_patch_editor({
+    on_accept = function(edited_patch_text)
+      if opts.on_done then
+        local labels = require("codecompanion.interactions.chat.tools.labels")
+        opts.on_done(labels.accept)
+      end
+      opts.apply(edited_patch_text)
+    end,
+    on_cancel = function() end,
+  })
+end
+
 ---Open the floating diff view with associated keymaps
 ---@param opts table
 local function open_diff_view(opts)
@@ -47,7 +66,7 @@ local function open_diff_view(opts)
         if opts.on_done then
           opts.on_done(labels.accept)
         end
-        opts.apply()
+        opts.apply(nil)
       end,
       on_reject = function()
         if opts.on_done then
@@ -79,18 +98,26 @@ local function build_approval_choices(opts)
       end,
     },
     {
+      keymap = "ge",
+      label = "Edit patch",
+      preview = true,
+      callback = function()
+        open_patch_editor(opts)
+      end,
+    },
+    {
       keymap = keys.always_accept,
       label = labels.always_accept,
       callback = function()
         approvals:always(opts.chat_bufnr, { tool_name = "insert_edit_into_file" })
-        opts.apply()
+        opts.apply(nil)
       end,
     },
     {
       keymap = keys.accept,
       label = labels.accept,
       callback = function()
-        opts.apply()
+        opts.apply(nil)
       end,
     },
     {
